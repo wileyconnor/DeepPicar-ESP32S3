@@ -41,6 +41,7 @@ httpd_handle_t cmd_httpd = NULL;
 #include <Arduino.h>
 
 #include "control.h"
+#include "camera_lock.h"
 
 extern int g_use_dnn; // defined in src/main.cpp
 
@@ -72,14 +73,15 @@ static esp_err_t stream_handler(httpd_req_t *req)
 
     while (true)
     {
-        // Disable streaming while DNN is active
-        if (g_use_dnn) {
-            vTaskDelay(pdMS_TO_TICKS(100));
-            continue;
-        }
-
         TickType_t xLastWakeTime = xTaskGetTickCount();
         fr_pre = esp_timer_get_time();
+
+        bool have_cam_lock = false;
+        if (camera_mux) {
+            if (xSemaphoreTake(camera_mux, portMAX_DELAY) == pdTRUE) {
+                have_cam_lock = true;
+            }
+        }
 
         camera_fb_t *fb = esp_camera_fb_get();
         fr_cap = esp_timer_get_time();
@@ -87,14 +89,22 @@ static esp_err_t stream_handler(httpd_req_t *req)
         if (!fb) {
             Serial.printf("%s: Camera capture failed\n", __FUNCTION__);
             res = ESP_FAIL;
+            if (have_cam_lock) {
+                xSemaphoreGive(camera_mux);
+                have_cam_lock = false;
+            }
         } else {
             _timestamp.tv_sec = fb->timestamp.tv_sec;
             _timestamp.tv_usec = fb->timestamp.tv_usec;
-            // Serial.printf("fb: %dx%d, format: %d, len: %d\n", fb->width, fb->height, fb->format, fb->len);
-
             if (fb->format != PIXFORMAT_JPEG) {
+                Serial.printf("fb: %dx%d, format: %d, len: %d\n", fb->width, fb->height, fb->format, fb->len);
+
                 bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
                 esp_camera_fb_return(fb);
+                if (have_cam_lock) {
+                    xSemaphoreGive(camera_mux);
+                    have_cam_lock = false;
+                }
                 fb = NULL;
                 if (!jpeg_converted) {
                     Serial.println("JPEG compression failed");
@@ -117,6 +127,10 @@ static esp_err_t stream_handler(httpd_req_t *req)
             res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
         }        
         if (fb) {
+            if (have_cam_lock) {
+                xSemaphoreGive(camera_mux);
+                have_cam_lock = false;
+            }
             esp_camera_fb_return(fb);
             fb = NULL;
             _jpg_buf = NULL;
@@ -137,7 +151,11 @@ static esp_err_t stream_handler(httpd_req_t *req)
 
         // sleep 
         BaseType_t xWasDelayd = pdTRUE;
-        xWasDelayd = xTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000 / 20)); // 20fps
+        if (g_use_dnn) {
+            xWasDelayd = xTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000 / 2)); // 2fps
+        } else {
+            xWasDelayd = xTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000 / 20)); // 20fps
+        }
         // printf("Core%d: %s (prio=%d): %u ms (%.1ffps): enc: %d ms\n",
         //     xPortGetCoreID(), pcTaskGetName(NULL), uxTaskPriorityGet(NULL),
         //     (uint32_t)frame_time, 1000.0 / (uint32_t)frame_time, (uint32_t)((fr_enc - fr_cap)/1000));
@@ -177,16 +195,6 @@ static esp_err_t cmd_handler(httpd_req_t *req)
         sensor_t *s = esp_camera_sensor_get();
         if (s->pixformat != PIXFORMAT_RGB565) {
             s->set_pixformat(s, PIXFORMAT_RGB565);
-            // // Flush old frames from the buffer after format change
-            // for (int i = 0; i < 5; i++) {
-            //     camera_fb_t *fb = esp_camera_fb_get();
-            //     if (fb) {
-            //         esp_camera_fb_return(fb);
-            //     } else {
-            //         break;
-            //     }
-            // }
-            // delay(100);  // Give camera time to settle
         }
     } else if(!strcmp(variable, "manual")) {
         Serial.println("Manual mode");
@@ -194,16 +202,6 @@ static esp_err_t cmd_handler(httpd_req_t *req)
         sensor_t *s = esp_camera_sensor_get();
         if (s->pixformat != PIXFORMAT_JPEG) {
             s->set_pixformat(s, PIXFORMAT_JPEG);
-            // // Flush old frames from the buffer after format change
-            // for (int i = 0; i < 5; i++) {
-            //     camera_fb_t *fb = esp_camera_fb_get();
-            //     if (fb) {
-            //         esp_camera_fb_return(fb);
-            //     } else {
-            //         break;
-            //     }
-            // }
-            // delay(100);  // Give camera time to settle
         }
     } else if(!strcmp(variable, "throttle_pct")) {
         // printf("Core%d: %s (prio=%d): updated throttle %d\n",

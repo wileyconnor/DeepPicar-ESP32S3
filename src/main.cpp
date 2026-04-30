@@ -10,6 +10,9 @@
 
 #include "camera_pins.h"
 #include "control.h" // motor control
+#include "camera_lock.h"
+
+SemaphoreHandle_t camera_mux = NULL;
 // prepare input image tensor
 
 #define USE_INT8 1
@@ -99,11 +102,11 @@ void setup() {
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
   config.frame_size = FRAMESIZE_QVGA;
-  #if 1
+  if (!g_use_dnn) {
     config.pixel_format = PIXFORMAT_JPEG; // for streaming
-  #else
+  } else {
     config.pixel_format = PIXFORMAT_RGB565; // for dnn
-  #endif
+  }
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.jpeg_quality = 12;
@@ -119,6 +122,12 @@ void setup() {
   Serial.println("Camera init success!");
   Serial.printf("Camera info: framesize=%d, pixel_format=%d\n", config.frame_size, config.pixel_format);
   
+  // create camera access mutex to serialize esp_camera_fb_get()/esp_camera_fb_return()
+  camera_mux = xSemaphoreCreateMutex();
+  if (camera_mux == NULL) {
+    Serial.println("Failed to create camera mutex");
+  }
+
   // start stream and command http servers
   startCameraServer();
 
@@ -285,13 +294,22 @@ void dnn_loop()
   if (!last_frame)
     last_frame = fr_begin;
 
+  if (camera_mux) {
+    xSemaphoreTake(camera_mux, portMAX_DELAY);
+  }
   fb = esp_camera_fb_get();
   if (!fb ) {
     printf("%s: Camera capture failed\n", __FUNCTION__);
+    if (camera_mux) {
+      xSemaphoreGive(camera_mux);
+    }
     return;
   } else if (fb->format != PIXFORMAT_RGB565) {
     printf("%s: Camera capture has unsupported format %d\n", __FUNCTION__, fb->format);
     esp_camera_fb_return(fb);
+    if (camera_mux) {
+      xSemaphoreGive(camera_mux);
+    }
     return;
   }
 
@@ -330,6 +348,9 @@ void dnn_loop()
   if (fb)
   {
       esp_camera_fb_return(fb);
+      if (camera_mux) {
+        xSemaphoreGive(camera_mux);
+      }
       fb = NULL;
   }
 
