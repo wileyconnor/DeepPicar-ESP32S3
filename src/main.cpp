@@ -35,7 +35,7 @@ int g_use_dnn = 0; // set by web server
 NeuralNetwork *g_nn;
 
 void startCameraServer();
-void dnn_loop();
+void dnn_loop(camera_fb_t *fb);
 
 void setup() {
   // Serial init
@@ -101,10 +101,11 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
-  config.frame_size = FRAMESIZE_QVGA;
   if (!g_use_dnn) {
+    config.frame_size = FRAMESIZE_QVGA;
     config.pixel_format = PIXFORMAT_JPEG; // for streaming
   } else {
+    config.frame_size = FRAMESIZE_QQVGA;
     config.pixel_format = PIXFORMAT_RGB565; // for dnn
   }
   config.grab_mode = CAMERA_GRAB_LATEST;
@@ -144,8 +145,15 @@ void setup() {
 // loopTask Core1, prio=1 stack=4096
 void loop() {
   if (g_use_dnn) {
-    // dnn control
-    dnn_loop();
+    // run dnn control loop
+    camera_fb_t *fb = NULL;
+    if (camera_mux) xSemaphoreTake(camera_mux, portMAX_DELAY);
+    fb = esp_camera_fb_get();
+    // dnn control loop
+    dnn_loop(fb);
+    // return camera frame buffer
+    esp_camera_fb_return(fb);
+    if (camera_mux)  xSemaphoreGive(camera_mux);
   } else {
     // manual control
     delay(1000);
@@ -281,37 +289,26 @@ int GetAction(float rad)
     return -1;
 }
 
-void dnn_loop()
+void dnn_loop(camera_fb_t *fb)
 {
-  camera_fb_t *fb = NULL;
   int64_t fr_begin, fr_cap, fr_pre, fr_dnn;
   static int64_t last_frame = 0;
 
   printf("Starting DNN loop on core %d\n", xPortGetCoreID());
+
+  if (fb == NULL) {
+    Serial.println("Camera capture failed");
+    return;
+  } else if (fb->format != PIXFORMAT_RGB565) {
+    printf("%s: Camera capture has unsupported format %d\n", __FUNCTION__, fb->format);
+    return;
+  }
 
   fr_begin = esp_timer_get_time();
 
   if (!last_frame)
     last_frame = fr_begin;
 
-  if (camera_mux) {
-    xSemaphoreTake(camera_mux, portMAX_DELAY);
-  }
-  fb = esp_camera_fb_get();
-  if (!fb ) {
-    printf("%s: Camera capture failed\n", __FUNCTION__);
-    if (camera_mux) {
-      xSemaphoreGive(camera_mux);
-    }
-    return;
-  } else if (fb->format != PIXFORMAT_RGB565) {
-    printf("%s: Camera capture has unsupported format %d\n", __FUNCTION__, fb->format);
-    esp_camera_fb_return(fb);
-    if (camera_mux) {
-      xSemaphoreGive(camera_mux);
-    }
-    return;
-  }
 
   fr_cap = esp_timer_get_time();
 
@@ -344,15 +341,6 @@ void dnn_loop()
   // set steering  
   set_steering(deg);
   printf("deg=%d (%.3f)\n", deg, angle);
-
-  if (fb)
-  {
-      esp_camera_fb_return(fb);
-      if (camera_mux) {
-        xSemaphoreGive(camera_mux);
-      }
-      fb = NULL;
-  }
 
   int64_t fr_end = esp_timer_get_time();
   int64_t frame_time = (fr_end - last_frame)/1000;
