@@ -101,6 +101,10 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
+#if 1
+  config.frame_size = FRAMESIZE_QVGA;
+  config.pixel_format = PIXFORMAT_RGB565; // for streaming
+#else
   if (!g_use_dnn) {
     config.frame_size = FRAMESIZE_QVGA;
     config.pixel_format = PIXFORMAT_JPEG; // for streaming
@@ -108,6 +112,7 @@ void setup() {
     config.frame_size = FRAMESIZE_QQVGA;
     config.pixel_format = PIXFORMAT_RGB565; // for dnn
   }
+#endif
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.jpeg_quality = 12;
@@ -144,6 +149,9 @@ void setup() {
 
 // loopTask Core1, prio=1 stack=4096
 void loop() {
+  BaseType_t xWasDelayd;
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+
   if (g_use_dnn) {
     // run dnn control loop
     camera_fb_t *fb = NULL;
@@ -151,6 +159,9 @@ void loop() {
     fb = esp_camera_fb_get();
     // dnn control loop
     dnn_loop(fb);
+
+    xWasDelayd = xTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000 / 20)); // 20fps
+
     // return camera frame buffer
     esp_camera_fb_return(fb);
     if (camera_mux)  xSemaphoreGive(camera_mux);
@@ -294,7 +305,7 @@ void dnn_loop(camera_fb_t *fb)
   int64_t fr_begin, fr_cap, fr_pre, fr_dnn;
   static int64_t last_frame = 0;
 
-  printf("Starting DNN loop on core %d\n", xPortGetCoreID());
+  // printf("Starting DNN loop on core %d\n", xPortGetCoreID());
 
   if (fb == NULL) {
     Serial.println("Camera capture failed");

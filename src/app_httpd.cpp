@@ -93,8 +93,8 @@ static esp_err_t stream_handler(httpd_req_t *req)
                 bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
                 esp_camera_fb_return(fb);
 
-                Serial.printf("fb: %dx%d, format: %d, len: %d\n", fb->width, fb->height, fb->format, fb->len);
-                Serial.printf("jpg: %d bytes, converted: %s\n", _jpg_buf_len, jpeg_converted ? "yes" : "no");
+                // Serial.printf("fb: %dx%d, format: %d, len: %d\n", fb->width, fb->height, fb->format, fb->len);
+                // Serial.printf("jpg: %d bytes, converted: %s\n", _jpg_buf_len, jpeg_converted ? "yes" : "no");
                 if (camera_mux) xSemaphoreGive(camera_mux);
                 fb = NULL;
                 if (!jpeg_converted) {
@@ -107,27 +107,27 @@ static esp_err_t stream_handler(httpd_req_t *req)
             }
             fr_enc = esp_timer_get_time();
 
-            printf("Camera capture: %d ms, JPEG encode: %d ms\n", (uint32_t)((fr_cap - fr_pre)/1000), (uint32_t)((fr_enc - fr_cap)/1000));
+            // printf("Camera capture: %d ms, JPEG encode: %d ms\n", (uint32_t)((fr_cap - fr_pre)/1000), (uint32_t)((fr_enc - fr_cap)/1000));
             if (res == ESP_OK) {
                 res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
             }
-            printf("Send stream boundary: %d ms\n", (uint32_t)((esp_timer_get_time() - fr_enc)/1000));
+            // printf("Send stream boundary: %d ms\n", (uint32_t)((esp_timer_get_time() - fr_enc)/1000));
             if (res == ESP_OK) {
                 size_t hlen = snprintf((char *)part_buf, 128, _STREAM_PART, _jpg_buf_len, _timestamp.tv_sec, _timestamp.tv_usec);
                 res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
             }
-            printf("Send stream header: %d ms\n", (uint32_t)((esp_timer_get_time() - fr_enc)/1000));
+            // printf("Send stream header: %d ms\n", (uint32_t)((esp_timer_get_time() - fr_enc)/1000));
             if (res == ESP_OK) {
                 res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
             }
-            printf("Send stream data: %d ms\n", (uint32_t)((esp_timer_get_time() - fr_enc)/1000));
+            // printf("Send stream data: %d ms\n", (uint32_t)((esp_timer_get_time() - fr_enc)/1000));
             if (fb) {
                 esp_camera_fb_return(fb);
                 fb = NULL;
                 _jpg_buf = NULL;
                 if (camera_mux)  xSemaphoreGive(camera_mux);
             } else if (_jpg_buf) {
-                printf("Freeing JPEG buffer: %d bytes\n", _jpg_buf_len);
+                // printf("Freeing JPEG buffer: %d bytes\n", _jpg_buf_len);
                 free(_jpg_buf);
                 _jpg_buf = NULL;
             }
@@ -184,21 +184,9 @@ static esp_err_t cmd_handler(httpd_req_t *req)
     if(!strcmp(variable, "auto")) {
         Serial.println("Autonomous mode");
         g_use_dnn = 1;
-        if (camera_mux) xSemaphoreTake(camera_mux, portMAX_DELAY);
-        sensor_t *s = esp_camera_sensor_get();
-        if (s->pixformat != PIXFORMAT_RGB565) {
-            s->set_pixformat(s, PIXFORMAT_RGB565);
-        }
-        if (camera_mux) xSemaphoreGive(camera_mux);
     } else if(!strcmp(variable, "manual")) {
         Serial.println("Manual mode");
         g_use_dnn = 0;
-        if (camera_mux) xSemaphoreTake(camera_mux, portMAX_DELAY);
-        sensor_t *s = esp_camera_sensor_get();
-        if (s->pixformat != PIXFORMAT_JPEG) {
-            s->set_pixformat(s, PIXFORMAT_JPEG);
-        }
-        if (camera_mux) xSemaphoreGive(camera_mux);
     } else if(!strcmp(variable, "throttle_pct")) {
         // printf("Core%d: %s (prio=%d): updated throttle %d\n",
         //     xPortGetCoreID(), pcTaskGetName(NULL), uxTaskPriorityGet(NULL), val);
@@ -208,16 +196,8 @@ static esp_err_t cmd_handler(httpd_req_t *req)
         //     xPortGetCoreID(), pcTaskGetName(NULL), uxTaskPriorityGet(NULL), val);
         set_steering(val);
     } else if (!strcmp(variable, "framesize")) {
-#if 0
-        if (camera_mux) xSemaphoreTake(camera_mux, portMAX_DELAY);
-        sensor_t *s = esp_camera_sensor_get();
-        res = s->set_framesize(s, (framesize_t)val);
-        printf("Camera info: framesize=%d, pixel_format=%d\n", s->status.framesize, s->pixformat);
-        if (camera_mux) xSemaphoreGive(camera_mux);
-#else
         log_i("Set framesize to %d is not supported yet", val);
         res = -1;
-#endif
     } else {
         log_i("Unknown command: %s", variable);
         res = -1;
