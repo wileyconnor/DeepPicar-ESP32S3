@@ -2,10 +2,16 @@
 
 ## Components
 
+- Pololu DRV8835 Motor Driver
+- Xiao ESP32S3 MCU
+- Bread board jumper wires
+
 ## Pinouts 
 
+### DRV8835
 ![drv8835-pinout.jpg](./docs/drv8835-pinout.jpg)
 
+### ESP32S3
 ![esp32s3-pinout.jpg](./docs/esp32s3-pinout.jpg)
 
 ## Connection guideline

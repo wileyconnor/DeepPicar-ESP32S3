@@ -41,6 +41,7 @@ httpd_handle_t cmd_httpd = NULL;
 #include <Arduino.h>
 
 #include "control.h"
+#include "camera_lock.h"
 
 extern int g_use_dnn; // defined in src/main.cpp
 
@@ -48,7 +49,6 @@ extern int g_use_dnn; // defined in src/main.cpp
 // Core1, priority=5, stack=4096
 static esp_err_t stream_handler(httpd_req_t *req)
 {
-    camera_fb_t *fb = NULL;
     struct timeval _timestamp;
     esp_err_t res = ESP_OK;
     size_t _jpg_buf_len = 0;
@@ -76,21 +76,26 @@ static esp_err_t stream_handler(httpd_req_t *req)
         TickType_t xLastWakeTime = xTaskGetTickCount();
         fr_pre = esp_timer_get_time();
 
-        fb = esp_camera_fb_get();
-        
+        if (camera_mux) xSemaphoreTake(camera_mux, portMAX_DELAY);
+
         fr_cap = esp_timer_get_time();
 
+        camera_fb_t *fb = esp_camera_fb_get();
+
         if (!fb) {
-            Serial.println("Camera capture failed");
+            Serial.printf("%s: Camera capture failed\n", __FUNCTION__);
             res = ESP_FAIL;
+            if (camera_mux) xSemaphoreGive(camera_mux);
         } else {
             _timestamp.tv_sec = fb->timestamp.tv_sec;
             _timestamp.tv_usec = fb->timestamp.tv_usec;
-            // Serial.printf("fb: %dx%d, format: %d, len: %d\n", fb->width, fb->height, fb->format, fb->len);
-
             if (fb->format != PIXFORMAT_JPEG) {
                 bool jpeg_converted = frame2jpg(fb, 80, &_jpg_buf, &_jpg_buf_len);
                 esp_camera_fb_return(fb);
+
+                // Serial.printf("fb: %dx%d, format: %d, len: %d\n", fb->width, fb->height, fb->format, fb->len);
+                // Serial.printf("jpg: %d bytes, converted: %s\n", _jpg_buf_len, jpeg_converted ? "yes" : "no");
+                if (camera_mux) xSemaphoreGive(camera_mux);
                 fb = NULL;
                 if (!jpeg_converted) {
                     Serial.println("JPEG compression failed");
@@ -101,45 +106,52 @@ static esp_err_t stream_handler(httpd_req_t *req)
                 _jpg_buf = fb->buf;
             }
             fr_enc = esp_timer_get_time();
-        }
-        if (res == ESP_OK) {
-            res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
-        }
-        if (res == ESP_OK) {
-            size_t hlen = snprintf((char *)part_buf, 128, _STREAM_PART, _jpg_buf_len, _timestamp.tv_sec, _timestamp.tv_usec);
-            res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
-        }
-        if (res == ESP_OK) {
-            res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
-        }        
-        if (fb) {
-            esp_camera_fb_return(fb);
-            fb = NULL;
-            _jpg_buf = NULL;
-        } else if (_jpg_buf) {
-            free(_jpg_buf);
-            _jpg_buf = NULL;
-        }
-        if (res != ESP_OK) {
-            Serial.println("Send frame failed");
-            break;
-        }
-        int64_t fr_end = esp_timer_get_time();
 
-        int64_t frame_time = (fr_end - last_frame)/1000;
+            // printf("Camera capture: %d ms, JPEG encode: %d ms\n", (uint32_t)((fr_cap - fr_pre)/1000), (uint32_t)((fr_enc - fr_cap)/1000));
+            if (res == ESP_OK) {
+                res = httpd_resp_send_chunk(req, _STREAM_BOUNDARY, strlen(_STREAM_BOUNDARY));
+            }
+            // printf("Send stream boundary: %d ms\n", (uint32_t)((esp_timer_get_time() - fr_enc)/1000));
+            if (res == ESP_OK) {
+                size_t hlen = snprintf((char *)part_buf, 128, _STREAM_PART, _jpg_buf_len, _timestamp.tv_sec, _timestamp.tv_usec);
+                res = httpd_resp_send_chunk(req, (const char *)part_buf, hlen);
+            }
+            // printf("Send stream header: %d ms\n", (uint32_t)((esp_timer_get_time() - fr_enc)/1000));
+            if (res == ESP_OK) {
+                res = httpd_resp_send_chunk(req, (const char *)_jpg_buf, _jpg_buf_len);
+            }
+            // printf("Send stream data: %d ms\n", (uint32_t)((esp_timer_get_time() - fr_enc)/1000));
+            if (fb) {
+                esp_camera_fb_return(fb);
+                fb = NULL;
+                _jpg_buf = NULL;
+                if (camera_mux)  xSemaphoreGive(camera_mux);
+            } else if (_jpg_buf) {
+                // printf("Freeing JPEG buffer: %d bytes\n", _jpg_buf_len);
+                free(_jpg_buf);
+                _jpg_buf = NULL;
+            }
+            if (res != ESP_OK) {
+                Serial.println("Send frame failed");
+                break;
+            }
+            int64_t fr_end = esp_timer_get_time();
+
+            int64_t frame_time = (fr_end - last_frame)/1000;
     
-        last_frame = fr_end;
-
+            last_frame = fr_end;
+        }
         // sleep 
         BaseType_t xWasDelayd = pdTRUE;
         if (g_use_dnn) {
-            xWasDelayd = xTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000)); // 1fps
-            printf("Core%d: %s (prio=%d): %u ms (%.1ffps): enc: %d ms\n",
-                xPortGetCoreID(), pcTaskGetName(NULL), uxTaskPriorityGet(NULL),
-                (uint32_t)frame_time, 1000.0 / (uint32_t)frame_time, (uint32_t)((fr_enc - fr_cap)/1000));
+            xWasDelayd = xTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000 / 2)); // 2fps
         } else {
             xWasDelayd = xTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000 / 20)); // 20fps
         }
+        // printf("Core%d: %s (prio=%d): %u ms (%.1ffps): enc: %d ms\n",
+        //     xPortGetCoreID(), pcTaskGetName(NULL), uxTaskPriorityGet(NULL),
+        //     (uint32_t)frame_time, 1000.0 / (uint32_t)frame_time, (uint32_t)((fr_enc - fr_cap)/1000));
+
         if (xWasDelayd == pdFALSE) {
             log_w("Task was blocked for longer than the set period");       
         }
@@ -172,17 +184,9 @@ static esp_err_t cmd_handler(httpd_req_t *req)
     if(!strcmp(variable, "auto")) {
         Serial.println("Autonomous mode");
         g_use_dnn = 1;
-        sensor_t *s = esp_camera_sensor_get();
-        if (s->pixformat != PIXFORMAT_RGB565) {
-            s->set_pixformat(s, PIXFORMAT_RGB565);
-        }
     } else if(!strcmp(variable, "manual")) {
         Serial.println("Manual mode");
         g_use_dnn = 0;
-        sensor_t *s = esp_camera_sensor_get();
-        if (s->pixformat != PIXFORMAT_JPEG) {
-            s->set_pixformat(s, PIXFORMAT_JPEG);
-        }
     } else if(!strcmp(variable, "throttle_pct")) {
         // printf("Core%d: %s (prio=%d): updated throttle %d\n",
         //     xPortGetCoreID(), pcTaskGetName(NULL), uxTaskPriorityGet(NULL), val);
@@ -192,9 +196,8 @@ static esp_err_t cmd_handler(httpd_req_t *req)
         //     xPortGetCoreID(), pcTaskGetName(NULL), uxTaskPriorityGet(NULL), val);
         set_steering(val);
     } else if (!strcmp(variable, "framesize")) {
-        sensor_t *s = esp_camera_sensor_get();
-        res = s->set_framesize(s, (framesize_t)val);
-        printf("Camera info: framesize=%d, pixel_format=%d\n", s->status.framesize, s->pixformat);
+        log_i("Set framesize to %d is not supported yet", val);
+        res = -1;
     } else {
         log_i("Unknown command: %s", variable);
         res = -1;

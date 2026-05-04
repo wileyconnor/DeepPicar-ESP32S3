@@ -10,6 +10,9 @@
 
 #include "camera_pins.h"
 #include "control.h" // motor control
+#include "camera_lock.h"
+
+SemaphoreHandle_t camera_mux = NULL;
 // prepare input image tensor
 
 #define USE_INT8 1
@@ -32,7 +35,7 @@ int g_use_dnn = 0; // set by web server
 NeuralNetwork *g_nn;
 
 void startCameraServer();
-void dnn_loop();
+void dnn_loop(camera_fb_t *fb);
 
 void setup() {
   // Serial init
@@ -98,12 +101,18 @@ void setup() {
   config.pin_pwdn = PWDN_GPIO_NUM;
   config.pin_reset = RESET_GPIO_NUM;
   config.xclk_freq_hz = 20000000;
+#if 1
   config.frame_size = FRAMESIZE_QVGA;
-  #if 1
+  config.pixel_format = PIXFORMAT_RGB565; // for streaming
+#else
+  if (!g_use_dnn) {
+    config.frame_size = FRAMESIZE_QVGA;
     config.pixel_format = PIXFORMAT_JPEG; // for streaming
-  #else
+  } else {
+    config.frame_size = FRAMESIZE_QQVGA;
     config.pixel_format = PIXFORMAT_RGB565; // for dnn
-  #endif
+  }
+#endif
   config.grab_mode = CAMERA_GRAB_LATEST;
   config.fb_location = CAMERA_FB_IN_PSRAM;
   config.jpeg_quality = 12;
@@ -119,6 +128,12 @@ void setup() {
   Serial.println("Camera init success!");
   Serial.printf("Camera info: framesize=%d, pixel_format=%d\n", config.frame_size, config.pixel_format);
   
+  // create camera access mutex to serialize esp_camera_fb_get()/esp_camera_fb_return()
+  camera_mux = xSemaphoreCreateMutex();
+  if (camera_mux == NULL) {
+    Serial.println("Failed to create camera mutex");
+  }
+
   // start stream and command http servers
   startCameraServer();
 
@@ -134,9 +149,22 @@ void setup() {
 
 // loopTask Core1, prio=1 stack=4096
 void loop() {
+  BaseType_t xWasDelayd;
+  TickType_t xLastWakeTime = xTaskGetTickCount();
+
   if (g_use_dnn) {
-    // dnn control
-    dnn_loop();
+    // run dnn control loop
+    camera_fb_t *fb = NULL;
+    if (camera_mux) xSemaphoreTake(camera_mux, portMAX_DELAY);
+    fb = esp_camera_fb_get();
+    // dnn control loop
+    dnn_loop(fb);
+
+    xWasDelayd = xTaskDelayUntil(&xLastWakeTime, pdMS_TO_TICKS(1000 / 20)); // 20fps
+
+    // return camera frame buffer
+    esp_camera_fb_return(fb);
+    if (camera_mux)  xSemaphoreGive(camera_mux);
   } else {
     // manual control
     delay(1000);
@@ -272,23 +300,26 @@ int GetAction(float rad)
     return -1;
 }
 
-void dnn_loop()
+void dnn_loop(camera_fb_t *fb)
 {
-  camera_fb_t *fb = NULL;
   int64_t fr_begin, fr_cap, fr_pre, fr_dnn;
   static int64_t last_frame = 0;
+
+  // printf("Starting DNN loop on core %d\n", xPortGetCoreID());
+
+  if (fb == NULL) {
+    Serial.println("Camera capture failed");
+    return;
+  } else if (fb->format != PIXFORMAT_RGB565) {
+    printf("%s: Camera capture has unsupported format %d\n", __FUNCTION__, fb->format);
+    return;
+  }
 
   fr_begin = esp_timer_get_time();
 
   if (!last_frame)
     last_frame = fr_begin;
 
-  fb = esp_camera_fb_get();
-
-  if (!fb) {
-    Serial.println("Camera capture failed");
-    return;
-  }
 
   fr_cap = esp_timer_get_time();
 
@@ -322,16 +353,12 @@ void dnn_loop()
   set_steering(deg);
   printf("deg=%d (%.3f)\n", deg, angle);
 
-  if (fb)
-  {
-      esp_camera_fb_return(fb);
-      fb = NULL;
-  }
   int64_t fr_end = esp_timer_get_time();
   int64_t frame_time = (fr_end - last_frame)/1000;
 
-  printf("Core%d: %s (prio=%d) %ums (%.1ffps): cap=%dms, pre=%dms, dnn=%dms\n", 
-      xPortGetCoreID(), pcTaskGetName(NULL), uxTaskPriorityGet(NULL), 
+  printf("%s: Core%d: %s (prio=%d) %ums (%.1ffps): cap=%dms, pre=%dms, dnn=%dms\n",
+      __FUNCTION__,
+      xPortGetCoreID(), pcTaskGetName(NULL), uxTaskPriorityGet(NULL),
       (uint32_t)frame_time, 1000.0 / (uint32_t)frame_time,
       (int)((fr_cap-fr_begin)/1000), (int)((fr_pre-fr_cap)/1000), (int)((fr_dnn-fr_pre)/1000));
 
