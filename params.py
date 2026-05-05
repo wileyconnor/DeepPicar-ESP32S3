@@ -20,7 +20,7 @@ actuator="actuator-esp32web"
 #   "input-kbd", "input-joystick", "input-web"
 ##########################################################
 inputdev="input-kbd"
-
+# inputdev = "input-wind"
 ##########################################################
 # model input config 
 #   160x120x3 or 80x60x3 or 40x30x3
